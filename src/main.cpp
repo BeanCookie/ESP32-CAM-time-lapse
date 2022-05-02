@@ -28,7 +28,7 @@ Settings settings;
 WiFiClient client;
 
 // Deep sleep interval in seconds
-int deep_sleep_interval = 285;
+int deep_sleep_interval = 10;
 
 // Deep sleep alarm interval in seconds
 int deep_sleep_alarm_interval = 20;
@@ -53,22 +53,23 @@ bool device_connected_and_prepared = false;
 // CAMERA_MODEL_AI_THINKER
 // https://github.com/espressif/arduino-esp32/blob/master/libraries/ESP32/examples/Camera/CameraWebServer/camera_pins.h
 
-#define PWDN_GPIO_NUM 32
-#define RESET_GPIO_NUM -1
-#define XCLK_GPIO_NUM 0
-#define SIOD_GPIO_NUM 26
-#define SIOC_GPIO_NUM 27
-#define Y9_GPIO_NUM 35
-#define Y8_GPIO_NUM 34
-#define Y7_GPIO_NUM 39
-#define Y6_GPIO_NUM 36
-#define Y5_GPIO_NUM 21
-#define Y4_GPIO_NUM 19
-#define Y3_GPIO_NUM 18
-#define Y2_GPIO_NUM 5
-#define VSYNC_GPIO_NUM 25
-#define HREF_GPIO_NUM 23
-#define PCLK_GPIO_NUM 22
+#define CAMERA_MODEL_AI_THINKER
+#define PWDN_GPIO_NUM     32      // power to camera (on/off)
+#define RESET_GPIO_NUM    -1      // -1 = not used
+#define XCLK_GPIO_NUM      0
+#define SIOD_GPIO_NUM     26      // i2c sda
+#define SIOC_GPIO_NUM     27      // i2c scl
+#define Y9_GPIO_NUM       35
+#define Y8_GPIO_NUM       34
+#define Y7_GPIO_NUM       39
+#define Y6_GPIO_NUM       36
+#define Y5_GPIO_NUM       21
+#define Y4_GPIO_NUM       19
+#define Y3_GPIO_NUM       18
+#define Y2_GPIO_NUM        5
+#define VSYNC_GPIO_NUM    25      // vsync_pin
+#define HREF_GPIO_NUM     23      // href_pin
+#define PCLK_GPIO_NUM     22      // pixel_clock_pin
 
 // 1 byte in EEPROM
 #define EEPROM_SIZE 1
@@ -188,7 +189,6 @@ bool init_wifi()
   int connAttempts = 0;
   Serial.println("\r\nConnecting to: " + String(settings.wifiSSID));
   // try config - quicker for WiFi connection
-  //WiFi.config(settings.ip, settings.gateway, settings.subnet, settings.gateway);
   WiFi.begin(settings.wifiSSID, settings.wifiPassword);
 
   while (WiFi.status() != WL_CONNECTED)
@@ -199,16 +199,15 @@ bool init_wifi()
       return false;
     connAttempts++;
   }
+  Serial.println("\r\nConnecting to: " + String(settings.wifiSSID) + " OK");
   return true;
 }
 
 bool init_blynk()
 {
-  Blynk.config(settings.blynkAuth);
+  Blynk.begin(settings.blynkAuth, settings.wifiSSID, settings.wifiPassword, settings.blynkDomain, settings.blynkPort);
   // timeout v milisekundach * 3
-  Blynk.connect(3000);
   return Blynk.connected();
-  // return true;
 }
 
 bool init_camera()
@@ -232,24 +231,19 @@ bool init_camera()
   config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000; // zkusit 16500000 https://github.com/espressif/esp32-camera/issues/150 // 20000000
-  config.pixel_format = PIXFORMAT_JPEG;
+  config.xclk_freq_hz = 20000000;               // XCLK 20MHz or 10MHz for OV2640 double FPS (Experimental)
+  config.pixel_format = PIXFORMAT_JPEG;              // Options =  YUV422, GRAYSCALE, RGB565, JPEG, RGB888
+  config.frame_size = FRAMESIZE_UXGA;           // Image sizes: 160x120 (QQVGA), 128x160 (QQVGA2), 176x144 (QCIF), 240x176 (HQVGA), 320x240 (QVGA),
+                                                //              400x296 (CIF), 640x480 (VGA, default), 800x600 (SVGA), 1024x768 (XGA), 1280x1024 (SXGA),
+                                                //              1600x1200 (UXGA)
+  config.jpeg_quality = 20;                     // 0-63 lower number means higher quality (can cause failed image capture if set too low at higher resolutions)
+  config.fb_count = 1;                          // if more than one, i2s runs in continuous mode. Use only with JPEG
 
-  //init with high specs to pre-allocate larger buffers
-  if (psramFound())
-  {
-    config.frame_size = FRAMESIZE_UXGA;
-    // 0 is best, 63 lowest
-    config.jpeg_quality = 20; // zkusit 1
-    config.fb_count = 3;      // zkusit 3?
-    Serial.printf("Buffer OK");
-  }
-  else
-  {
-    config.frame_size = FRAMESIZE_SVGA;
-    config.jpeg_quality = 12;
-    config.fb_count = 1;
-    Serial.printf("Small buffer!");
+  // check the esp32cam board has a psram chip installed (extra memory used for storing captured images)
+  //    Note: if not using "AI thinker esp32 cam" in the Arduino IDE, SPIFFS must be enabled
+  if (!psramFound()) {
+    Serial.println("Warning: No PSRam found so defaulting to image size 'VGA'");
+    config.frame_size = FRAMESIZE_VGA;
   }
 
   // camera init
@@ -303,17 +297,14 @@ bool init_camera()
 
     Serial.println(problem);
 
-    if (init_wifi())
+    if (init_blynk())
     {
-      if (init_blynk())
-      {
-        Serial.println("Blynk connected OK, wait to sync");
-        Blynk.run();
-        // delay for Blynk sync
-        delay(2000);
+      Serial.println("Blynk connected OK, wait to sync");
+      Blynk.run();
+      // delay for Blynk sync
+      delay(2000);
 
-        Blynk.virtualWrite(V13, problem);
-      }
+      Blynk.virtualWrite(V13, problem);
     }
     return false;
   }
@@ -505,46 +496,23 @@ void setup()
   {
     Serial.println("Camera OK");
 
-    if (init_wifi())
+    Serial.println("Internet connected, connect to Blynk");
+    if (init_blynk())
     {
-      Serial.println("Internet connected, connect to Blynk");
-      if (init_blynk())
-      {
-        Serial.println("Blynk connected OK, wait to sync");
-        Blynk.run();
-        // delay for Blynk sync
-        delay(2000);
+      Serial.println("Blynk connected OK, wait to sync");
+      Blynk.run();
+      // delay for Blynk sync
+      delay(2000);
 
-        device_connected_and_prepared = true;
-        Serial.println("Setup done");
+      device_connected_and_prepared = true;
+      Serial.println("Setup done");
 
-        EEPROM.write(0, 0);
-        EEPROM.commit();
-      }
-      else
-      {
-        Serial.println("Blynk failed");
-      }
+      EEPROM.write(0, 0);
+      EEPROM.commit();
     }
     else
     {
-      Serial.println("No WiFi");
-      int attempsCount = EEPROM.read(0);
-
-      if (attempsCount >= WIFI_ATTEMPTS_COUNT)
-      {
-        Serial.println("RESTART");
-        EEPROM.write(0, 0);
-        EEPROM.commit();
-        ESP.restart();
-      }
-      else
-      {
-        attempsCount += 1;
-        Serial.println("Attempts count " + String(attempsCount));
-        EEPROM.write(0, attempsCount);
-        EEPROM.commit();
-      }
+      Serial.println("Blynk failed");
     }
   }
   else
